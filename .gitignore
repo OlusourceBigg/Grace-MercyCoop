@@ -1,7 +1,2 @@
-PORT=5000
-MONGO_URI=mongodb+srv://olusource_db_user:xOFKaUHW6M1PGNlm@cluster0.xxxxx.mongodb.net/grace_mercy_coop?retryWrites=true&w=majority
-JWT_SECRET=grace_and_mercy_cooperative_secret_key_2026
-# Termii SMS Configuration
-TERMII_API_KEY=your_termii_api_key_here
-TERMII_SENDER_ID=GraceMercy
-TERMII_BASE_URL=https://api.ng.termii.com/api
+node_modules
+.env
