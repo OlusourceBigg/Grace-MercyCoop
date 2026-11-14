@@ -1,43 +1,53 @@
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
 const Member = require('../models/Member');
+const jwt = require('jsonwebtoken');
+const { sendTermiiSMS } = require('../services/notificationService');
 
 const generateToken = (id) => {
-  return jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: '30d' });
+  return jwt.sign({ id }, process.env.JWT_SECRET || 'grace_mercy_default_secret_2026', {
+    expiresIn: '30d',
+  });
 };
 
-// @desc    Register a new member
-// @route   POST /api/auth/register
-const registerMember = async (req, res) => {
+const register = async (req, res) => {
   try {
     const { fullName, email, phone, password } = req.body;
 
-    const memberExists = await Member.findOne({ $or: [{ email }, { phone }] });
+    if (!fullName || !email || !phone || !password) {
+      return res.status(400).json({ message: 'All fields are required' });
+    }
+
+    const memberExists = await Member.findOne({
+      $or: [{ email: email.toLowerCase() }, { phone }],
+    });
+
     if (memberExists) {
       return res.status(400).json({ message: 'Member with this email or phone already exists' });
     }
 
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(password, salt);
-
-    // Generate Member ID (e.g., GM-2026-482)
-    const randomSuffix = Math.floor(100 + Math.random() * 900);
-    const memberId = 'GM-2026-' + randomSuffix;
+    const memberCount = await Member.countDocuments();
+    const memberId = `GM-2026-${String(memberCount + 101).padStart(3, '0')}`;
 
     const member = await Member.create({
-      memberId,
       fullName,
-      email,
+      email: email.toLowerCase(),
       phone,
-      password: hashedPassword,
+      password,
+      memberId,
+      role: 'Member',
     });
+
+    // Send SMS Notification
+    await sendTermiiSMS(
+      phone,
+      `Welcome to Grace & Mercy Coop, ${fullName}! Your Member ID is ${memberId}.`
+    );
 
     res.status(201).json({
       _id: member._id,
-      memberId: member.memberId,
       fullName: member.fullName,
       email: member.email,
       phone: member.phone,
+      memberId: member.memberId,
       role: member.role,
       token: generateToken(member._id),
     });
@@ -46,39 +56,54 @@ const registerMember = async (req, res) => {
   }
 };
 
-// @desc    Authenticate member & get token
-// @route   POST /api/auth/login
-const loginMember = async (req, res) => {
+const login = async (req, res) => {
   try {
-    const { identifier, password } = req.body; // Can be email or phone
+    const { identifier, password } = req.body;
+
+    if (!identifier || !password) {
+      return res.status(400).json({ message: 'Please provide identifier and password' });
+    }
 
     const member = await Member.findOne({
-      $or: [{ email: identifier }, { phone: identifier }, { memberId: identifier }],
+      $or: [
+        { email: identifier.toLowerCase() },
+        { memberId: identifier.toUpperCase() },
+        { phone: identifier },
+      ],
     });
 
-    if (member && (await bcrypt.compare(password, member.password))) {
+    if (member && (await member.matchPassword(password))) {
       res.json({
         _id: member._id,
-        memberId: member.memberId,
         fullName: member.fullName,
         email: member.email,
         phone: member.phone,
+        memberId: member.memberId,
         role: member.role,
         kycStatus: member.kycStatus,
         token: generateToken(member._id),
       });
     } else {
-      res.status(401).json({ message: 'Invalid credentials or Member ID' });
+      res.status(401).json({ message: 'Invalid credentials or password' });
     }
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 };
 
-// @desc    Get current member profile
-// @route   GET /api/auth/me
 const getMe = async (req, res) => {
-  res.json(req.member);
+  try {
+    const member = await Member.findById(req.member._id).select('-password');
+    res.json(member);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
 };
 
-module.exports = { registerMember, loginMember, getMe };
+module.exports = {
+  register,
+  login,
+  getMe,
+  registerMember: register,
+  loginMember: login,
+};

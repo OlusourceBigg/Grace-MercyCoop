@@ -1,108 +1,91 @@
 const Member = require('../models/Member');
 const Loan = require('../models/Loan');
 const Transaction = require('../models/Transaction');
-const { sendSMS } = require('../services/notificationService');
+const { sendTermiiSMS, sendExpoPushNotification } = require('../services/notificationService');
 
-// @desc    Get cooperative overview metrics for executive board
-// @route   GET /api/admin/metrics
 const getExecutiveMetrics = async (req, res) => {
   try {
-    const totalMembers = await Member.countDocuments();
-    const pendingLoansCount = await Loan.countDocuments({ status: 'Pending' });
-    const activeLoans = await Loan.find({ status: 'Active' });
+    const totalMembers = await Member.countDocuments({ role: 'Member' });
+    const pendingLoans = await Loan.countDocuments({ status: 'Pending' });
 
-    const totalLoanPortfolio = activeLoans.reduce((sum, item) => sum + item.balance, 0);
+    const savingsAggregate = await Member.aggregate([
+      {
+        $group: {
+          _id: null,
+          totalSavings: { $sum: '$totalSavings' },
+          totalThrift: { $sum: '$monthlyThrift' },
+          totalShareCapital: { $sum: '$shareCapital' },
+        },
+      },
+    ]);
 
-    const members = await Member.find().select('totalSavings shareCapital specialDeposit');
-    const totalThriftLiquidity = members.reduce(
-      (sum, m) => sum + (m.totalSavings || 0) + (m.shareCapital || 0) + (m.specialDeposit || 0),
-      0
-    );
+    const metrics = savingsAggregate[0] || {
+      totalSavings: 0,
+      totalThrift: 0,
+      totalShareCapital: 0,
+    };
 
     res.json({
       totalMembers,
-      pendingLoansCount,
-      totalLoanPortfolio,
-      totalThriftLiquidity,
+      pendingLoans,
+      ...metrics,
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 };
 
-// @desc    Get all pending loan applications for board review
-// @route   GET /api/admin/loans/pending
 const getPendingLoans = async (req, res) => {
   try {
-    const pendingLoans = await Loan.find({ status: 'Pending' }).sort({ createdAt: -1 });
-    res.json(pendingLoans);
+    const loans = await Loan.find({ status: 'Pending' })
+      .populate('member', 'fullName memberId phone email totalSavings')
+      .sort({ createdAt: -1 });
+    res.json(loans);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 };
 
-// @desc    Approve or Reject a Loan Application with SMS Dispatch
-// @route   POST /api/admin/loans/action
 const processLoanAction = async (req, res) => {
   try {
     const { loanId, action, rejectionReason } = req.body;
+    if (!['Approved', 'Rejected'].includes(action)) {
+      return res.status(400).json({ message: "Action must be 'Approved' or 'Rejected'" });
+    }
 
-    const loan = await Loan.findOne({ loanId });
+    const loan = await Loan.findById(loanId).populate('member');
     if (!loan) {
-      return res.status(404).json({ message: 'Loan record not found' });
+      return res.status(404).json({ message: 'Loan not found' });
     }
 
-    if (loan.status !== 'Pending') {
-      return res.status(400).json({ message: `Loan is already marked as ${loan.status}` });
+    loan.status = action;
+    loan.approvedBy = req.member._id;
+    if (action === 'Rejected') {
+      loan.rejectionReason = rejectionReason || 'Criteria not met';
+    }
+    await loan.save();
+
+    // Notify Member
+    const smsMsg =
+      action === 'Approved'
+        ? `Dear ${loan.member.fullName}, your loan request of NGN ${loan.amount} has been APPROVED.`
+        : `Dear ${loan.member.fullName}, your loan request of NGN ${loan.amount} was not approved. Reason: ${loan.rejectionReason}`;
+
+    await sendTermiiSMS(loan.member.phone, smsMsg);
+    if (loan.member.expoPushToken) {
+      await sendExpoPushNotification(
+        loan.member.expoPushToken,
+        `Loan ${action}`,
+        `Your loan request of NGN ${loan.amount} was ${action.toLowerCase()}.`
+      );
     }
 
-    const applicant = await Member.findOne({ memberId: loan.memberId });
-
-    if (action === 'Approved') {
-      loan.status = 'Active';
-      await loan.save();
-
-      const transactionId = 'TXN-' + Math.floor(1000 + Math.random() * 9000);
-      await Transaction.create({
-        transactionId,
-        memberId: loan.memberId,
-        title: 'Loan Disbursement (' + loan.loanId + ')',
-        category: 'Loan',
-        amount: loan.principal,
-        type: 'credit',
-        status: 'Approved',
-      });
-
-      // Dispatch SMS to applicant
-      if (applicant) {
-        const approvalMsg = `Congratulations ${applicant.fullName}! Your loan request of NGN ${loan.principal.toLocaleString()} (Ref: ${loan.loanId}) has been APPROVED by the Executive Board and disbursed to your account.`;
-        sendSMS(applicant.phone, approvalMsg);
-      }
-
-      return res.json({ message: 'Loan approved and facility activated successfully.', loan });
-    } else {
-      loan.status = 'Rejected';
-      await loan.save();
-
-      // Dispatch Rejection SMS
-      if (applicant) {
-        const rejectionMsg = `Notice: Your loan application ${loan.loanId} has been declined by the Executive Committee. Reason: ${rejectionReason || 'Guarantor verification or credit policy limits.'}`;
-        sendSMS(applicant.phone, rejectionMsg);
-      }
-
-      return res.json({
-        message: 'Loan application rejected by executive committee.',
-        reason: rejectionReason || 'Criteria not met',
-        loan,
-      });
-    }
+    res.json({ message: `Loan ${action} successfully`, loan });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 };
 
-// @desc    Get member roster for KYC audits
-// @route   GET /api/admin/members
 const getAllMembers = async (req, res) => {
   try {
     const members = await Member.find().select('-password').sort({ createdAt: -1 });
@@ -112,24 +95,13 @@ const getAllMembers = async (req, res) => {
   }
 };
 
-// @desc    Update member KYC tier
-// @route   POST /api/admin/members/kyc
 const updateMemberKyc = async (req, res) => {
   try {
     const { memberId, kycStatus } = req.body;
-    const member = await Member.findOne({ memberId });
-    if (!member) {
-      return res.status(404).json({ message: 'Member not found' });
-    }
-
-    member.kycStatus = kycStatus;
-    await member.save();
-
-    // Send KYC Verified SMS
-    const kycMsg = `Grace & Mercy KYC Update: Member ${member.fullName}, your profile has been upgraded to ${kycStatus}. You now have full access to higher credit limits and voting privileges.`;
-    sendSMS(member.phone, kycMsg);
-
-    res.json({ message: `Member KYC updated to ${kycStatus}`, member });
+    const member = await Member.findByIdAndUpdate(memberId, { kycStatus }, { new: true }).select(
+      '-password'
+    );
+    res.json(member);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

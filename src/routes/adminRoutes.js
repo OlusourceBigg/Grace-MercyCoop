@@ -9,7 +9,6 @@ const {
 } = require('../controllers/adminController');
 const { protect, authorize } = require('../middleware/auth');
 
-// Restrict all sub-routes to Executive and Admin roles
 router.use(protect);
 router.use(authorize('Executive', 'Admin'));
 

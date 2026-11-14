@@ -1,87 +1,64 @@
 const Member = require('../models/Member');
 const Transaction = require('../models/Transaction');
-const { sendSMS } = require('../services/notificationService');
 
-// @desc    Get dashboard balances and equity summary
-// @route   GET /api/coop/summary
 const getSummary = async (req, res) => {
   try {
-    const member = await Member.findById(req.member._id);
-    if (!member) return res.status(404).json({ message: 'Member not found' });
-
+    const member = await Member.findById(req.member._id).select('-password');
     res.json({
-      fullName: member.fullName,
-      memberId: member.memberId,
-      kycStatus: member.kycStatus,
       totalSavings: member.totalSavings,
       monthlyThrift: member.monthlyThrift,
       shareCapital: member.shareCapital,
       specialDeposit: member.specialDeposit,
-      maxBorrowingLimit: member.totalSavings * 2,
-      nextOfKin: member.nextOfKin,
+      kycStatus: member.kycStatus,
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 };
 
-// @desc    Record savings or thrift deposit & dispatch credit alert
-// @route   POST /api/coop/deposit
 const recordDeposit = async (req, res) => {
   try {
-    const { amount, category } = req.body;
-    const numAmount = parseFloat(amount);
-
-    if (!amount || isNaN(numAmount) || numAmount <= 0) {
-      return res.status(400).json({ message: 'Invalid deposit amount' });
+    const { type, amount, reference } = req.body;
+    if (!type || !amount || !reference) {
+      return res.status(400).json({ message: 'Type, amount, and reference are required' });
     }
 
-    const member = await Member.findById(req.member._id);
-
-    if (category === 'Share Capital') {
-      member.shareCapital += numAmount;
-    } else if (category === 'Special Savings') {
-      member.specialDeposit += numAmount;
-    } else {
-      member.totalSavings += numAmount;
+    const validTypes = ['Savings', 'Thrift', 'ShareCapital', 'SpecialDeposit'];
+    if (!validTypes.includes(type)) {
+      return res.status(400).json({ message: 'Invalid deposit type' });
     }
 
-    await member.save();
-
-    const transactionId = 'TXN-' + Math.floor(1000 + Math.random() * 9000);
     const transaction = await Transaction.create({
-      transactionId,
-      memberId: member.memberId,
-      title: category + ' Deposit',
-      category: category === 'Share Capital' ? 'Share Capital' : 'Savings',
-      amount: numAmount,
-      type: 'credit',
-      status: 'Approved',
+      member: req.member._id,
+      type,
+      amount: Number(amount),
+      reference,
+      status: 'Success',
+      description: `Deposit to ${type}`,
     });
 
-    // Send Credit Alert SMS
-    const smsMessage = `Credit Alert! Your Grace & Mercy account ${member.memberId} has been credited with NGN ${numAmount.toLocaleString()} for ${category}. Total Thrift: NGN ${member.totalSavings.toLocaleString()}. Ref: ${transactionId}`;
-    sendSMS(member.phone, smsMessage);
+    const fieldMap = {
+      Savings: 'totalSavings',
+      Thrift: 'monthlyThrift',
+      ShareCapital: 'shareCapital',
+      SpecialDeposit: 'specialDeposit',
+    };
 
-    res.status(201).json({
-      message: 'Deposit recorded successfully',
-      updatedBalances: {
-        totalSavings: member.totalSavings,
-        shareCapital: member.shareCapital,
-        specialDeposit: member.specialDeposit,
-      },
-      transaction,
+    await Member.findByIdAndUpdate(req.member._id, {
+      $inc: { [fieldMap[type]]: Number(amount) },
     });
+
+    res.status(201).json({ message: 'Deposit recorded successfully', transaction });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 };
 
-// @desc    Get member account statement / transactions
-// @route   GET /api/coop/transactions
 const getTransactions = async (req, res) => {
   try {
-    const transactions = await Transaction.find({ memberId: req.member.memberId }).sort({ createdAt: -1 });
+    const transactions = await Transaction.find({ member: req.member._id }).sort({
+      createdAt: -1,
+    });
     res.json(transactions);
   } catch (error) {
     res.status(500).json({ message: error.message });

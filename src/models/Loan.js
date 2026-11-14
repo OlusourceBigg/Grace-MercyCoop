@@ -2,48 +2,28 @@ const mongoose = require('mongoose');
 
 const loanSchema = new mongoose.Schema(
   {
-    loanId: {
-      type: String,
-      required: true,
-      unique: true,
-    },
-    memberId: {
-      type: String,
-      required: true,
+    member: {
+      type: mongoose.Schema.Types.ObjectId,
       ref: 'Member',
-    },
-    type: {
-      type: String,
       required: true,
     },
-    principal: {
-      type: Number,
-      required: true,
-    },
-    balance: {
-      type: Number,
-      required: true,
-    },
-    tenorMonths: {
-      type: Number,
-      required: true,
-    },
-    monthlyDeduction: {
-      type: Number,
-      required: true,
-    },
-    guarantors: [
-      {
-        fullName: String,
-        memberId: String,
-        status: { type: String, default: 'Pending' },
-      },
-    ],
+    amount: { type: Number, required: true },
+    interestRate: { type: Number, default: 5 },
+    durationMonths: { type: Number, required: true },
+    monthlyRepayment: { type: Number, required: true },
+    totalRepayment: { type: Number, required: true },
+    purpose: { type: String, required: true },
     status: {
       type: String,
-      enum: ['Pending', 'Approved', 'Active', 'Completed', 'Defaulted'],
+      enum: ['Pending', 'Approved', 'Rejected', 'Disbursed', 'Repaid'],
       default: 'Pending',
     },
+    approvedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Member',
+      default: null,
+    },
+    rejectionReason: { type: String, default: null },
   },
   { timestamps: true }
 );
